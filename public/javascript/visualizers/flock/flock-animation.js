@@ -4,6 +4,7 @@
   var TEXTURE_SIZE = 128;          // 128×128 = 16,384 boids
   var BOID_COUNT   = TEXTURE_SIZE * TEXTURE_SIZE;
   var FIELD_SIZE   = 64;           // velocity/position field resolution
+  var PATH_SAMPLES = 512;          // texels in the 1-D path texture
 
   // ─── Shader sources ───────────────────────────────────────────────────────
 
@@ -61,15 +62,16 @@
     'uniform float u_coh;',
     'uniform float u_ali;',
     'uniform float u_speed;',
-    'uniform float u_blend;',   // 0 = full flock, 1 = full encircle
+    'uniform float u_blend;',   // 0 = full flock, 1 = full path
     'uniform float u_time;',
+    'uniform sampler2D u_pathTex;',   // 1-D path: 512×1 RGBA16F, .rg = (x,y) in [0,1]
     'layout(location=0) out vec4 outPos;',
     'layout(location=1) out vec4 outVel;',
 
-    'const float MAX_SPEED = 0.006;',
-    'const float MAX_FORCE = 0.0002;',
-    'const float CELL      = 1.0 / 64.0;',
-    'const float PI2       = 6.28318;',
+    'const float MAX_SPEED    = 0.006;',
+    'const float MAX_FORCE    = 0.0002;',
+    'const float CELL         = 1.0 / 64.0;',
+    'const float ORBIT_SPEED  = 0.05;',   // path circuits per second
 
     'vec2 steer(vec2 desired, vec2 vel) {',
     '  float len = length(desired);',
@@ -105,11 +107,11 @@
     '    : vec2(0.0);',
     '  vec2 velFlock = vel + ali + coh + sep;',
 
-    // Encircle velocity
-    '  float col      = floor(v_uv.x * 128.0);',
-    '  float row      = floor(v_uv.y * 128.0);',
-    '  float phase    = (row * 128.0 + col) / 16384.0 * PI2 - u_time * 0.5;',
-    '  vec2  target   = vec2(0.5 + 0.3 * cos(phase), 0.5 + 0.3 * sin(phase));',
+    // Path velocity — each boid gets a unique offset along the path, animated by u_time
+    '  float col       = floor(v_uv.x * 128.0);',
+    '  float row       = floor(v_uv.y * 128.0);',
+    '  float t         = fract((row * 128.0 + col) / 16384.0 - u_time * ORBIT_SPEED);',
+    '  vec2  target    = texture(u_pathTex, vec2(t, 0.5)).rg;',
     '  vec2  velCircle = vel + steer(target - pos, vel) * 15.0;',
 
     '  newVel = mix(velFlock, velCircle, u_blend);',
@@ -234,6 +236,82 @@
     return fbo;
   }
 
+  // 1-D path texture: N×1 RGBA16F, seeds with a circle until SVG loads
+  function createPathTex(gl, N) {
+    var data = new Float32Array(N * 4);
+    for (var i = 0; i < N; i++) {
+      var t = (i / N) * Math.PI * 2;
+      data[i * 4]     = 0.5 + 0.3 * Math.cos(t);
+      data[i * 4 + 1] = 0.5 + 0.3 * Math.sin(t);
+    }
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, N, 1, 0, gl.RGBA, gl.FLOAT, data);
+    return tex;
+  }
+
+  // Fetches path.svg, samples N arc-length-uniform points, normalises to [0,1],
+  // then uploads to the existing path texture.
+  function loadSvgPath(gl, tex, N) {
+    fetch('/javascript/visualizers/flock/path.svg')
+      .then(function (r) { return r.text(); })
+      .then(function (text) {
+        var doc      = new DOMParser().parseFromString(text, 'image/svg+xml');
+        var pathEl   = doc.querySelector('path');
+        if (!pathEl) { console.warn('path.svg has no <path> element'); return; }
+
+        // Temporarily insert into DOM so getTotalLength works cross-browser
+        var ns      = 'http://www.w3.org/2000/svg';
+        var svgWrap = document.createElementNS(ns, 'svg');
+        svgWrap.style.cssText = 'position:absolute;visibility:hidden;width:0;height:0;';
+        var tmp = document.createElementNS(ns, 'path');
+        tmp.setAttribute('d', pathEl.getAttribute('d'));
+        svgWrap.appendChild(tmp);
+        document.body.appendChild(svgWrap);
+
+        var total = tmp.getTotalLength();
+        var rawX = new Float32Array(N);
+        var rawY = new Float32Array(N);
+        for (var i = 0; i < N; i++) {
+          var pt = tmp.getPointAtLength((i / N) * total);
+          rawX[i] = pt.x;
+          rawY[i] = pt.y;
+        }
+        document.body.removeChild(svgWrap);
+
+        // Normalise: fit into [margin, 1-margin] preserving aspect ratio, centred
+        var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (var i = 0; i < N; i++) {
+          if (rawX[i] < minX) minX = rawX[i];
+          if (rawX[i] > maxX) maxX = rawX[i];
+          if (rawY[i] < minY) minY = rawY[i];
+          if (rawY[i] > maxY) maxY = rawY[i];
+        }
+        var margin = 0.15;
+        var span   = Math.max(maxX - minX, maxY - minY);
+        var scale  = (1.0 - 2 * margin) / span;
+        var cx     = (minX + maxX) / 2;
+        var cy     = (minY + maxY) / 2;
+
+        var data = new Float32Array(N * 4);
+        for (var i = 0; i < N; i++) {
+          data[i * 4]     = 0.5 + (rawX[i] - cx) * scale;
+          data[i * 4 + 1] = 0.5 + (rawY[i] - cy) * scale;
+        }
+
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, N, 1, 0, gl.RGBA, gl.FLOAT, data);
+        console.log('path.svg loaded and uploaded to GPU (' + N + ' samples)');
+      })
+      .catch(function (err) {
+        console.warn('path.svg not loaded, using circle fallback:', err);
+      });
+  }
+
   // Shared between field pass and render pass — both use layout(location=0) in vec2 a_uv
   function createBoidVAO(gl) {
     var uvs = new Float32Array(BOID_COUNT * 2);
@@ -320,6 +398,7 @@
     gl.useProgram(simProg);
     gl.uniform1i(sU.pos, 0);  gl.uniform1i(sU.vel, 1);
     gl.uniform1i(sU.velField, 2);  gl.uniform1i(sU.posField, 3);
+    gl.uniform1i(ul(simProg, 'u_pathTex'), 4);
 
     gl.useProgram(renderProg);
     gl.uniform1i(rU.pos, 0);  gl.uniform1i(rU.vel, 1);
@@ -354,10 +433,13 @@
     ];
     var fieldFBO = createFBO(gl, [velFieldTex, posFieldTex]);
 
+    var pathTex = createPathTex(gl, PATH_SAMPLES);
+    loadSvgPath(gl, pathTex, PATH_SAMPLES);
+
     var boidVAO = createBoidVAO(gl);
     var quadVAO = createQuadVAO(gl);
 
-    var BLEND_DURATION = 1.0;  // seconds for flock ↔ encircle transition
+    var BLEND_DURATION = 3.0;  // seconds for flock ↔ encircle transition
 
     var blend       = 0.0;
     var blendTarget = 0.0;
@@ -430,6 +512,8 @@
       gl.bindTexture(gl.TEXTURE_2D, velFieldTex);
       gl.activeTexture(gl.TEXTURE3);
       gl.bindTexture(gl.TEXTURE_2D, posFieldTex);
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, pathTex);
 
       gl.uniform1f(sU.sep,      sep);
       gl.uniform1f(sU.coh,      coh);
