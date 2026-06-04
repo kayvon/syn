@@ -2,16 +2,16 @@
   "name": "kin",
   "version": "0.0.1",
   "dependencies": {
-    "express": "~3.4.4",
-    "socket.io": "~0.9.16",
-    "jade": "*",
-    "stylus": "*",
-    "mysql": "~2.0.0-alpha9",
-    "mocha": "*",
+    "bower": "^1.3.4",
+    "browserify": "^17.0.1",
     "chai": "*",
-    "browserify": "~2.35.2",
+    "express": "~3.4.4",
+    "jade": "*",
+    "mocha": "*",
+    "mysql": "^2.18.1",
     "node-osc": "~0.2.1",
-    "underscore": "~1.6.0",
-    "bower": "^1.3.4"
+    "socket.io": "^4.8.3",
+    "stylus": "*",
+    "underscore": "^1.13.8"
   }
 }

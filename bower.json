@@ -18,7 +18,6 @@
     "paper": "~0.9.18",
     "pixi": "~1.5.3",
     "fastclick": "~1.0.2",
-    "tweenlite": "~1.11.5",
     "tweenjs": "*",
     "two": "~0.3.0",
     "threejs": "*",

@@ -26,16 +26,14 @@ var server = http.createServer(app);
 var port = process.env.PORT || 8080;
 var oscPort = process.env.OSC_PORT || 3333;
 server.listen(port);
-var io = require('socket.io').listen(server);
+var io = new (require('socket.io').Server)(server);
 app.set('io', io);
 app.set('oscIo', oscIo);
 
 console.log('Synesthesia server listing on ', port, "\nListening for OSC on port ", oscPort);
 
  // --- osc routing 
-var webcamio = require('socket.io').listen(8081);
-
-webcamio.set('log level', 1);
+var webcamio = new (require('socket.io').Server)(8081);
 
 var oscServer, oscClient;
 oscServer = new oscIo.Server(3333, '127.0.0.1');
